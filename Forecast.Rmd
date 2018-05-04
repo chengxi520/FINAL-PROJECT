@@ -1,0 +1,497 @@
+---
+title: "Forecast of the auto sales in the U.S"
+author: "Xi Cheng"
+date: "May 3, 2018"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, echo=FALSE, include=FALSE}
+knitr::knit_hooks$set(mysize = function(before, options, envir) {
+  if (before) 
+    return(options$size)
+})
+knitr::opts_chunk$set(size='\\small')
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(warning=FALSE)
+knitr::opts_chunk$set(message=FALSE)
+knitr::opts_chunk$set(fig.align='center')
+```
+This project will provide a ARIMA model and residuals model to predict the auto sales data in the USA.
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+#Before we start, here is all the packages that I might need:
+#install.packages("Amelia")
+#nstall.packages("data.table")
+#install.packages("forecast")
+#install.packages("gridExtra")
+#install.packages("ggpubr")
+#install.packages("grid")
+#install.packages("tseries")
+#install.packages("sarima")
+#install.packages("itsadug")
+#install.packages("lmtest")
+#install.packages("dlm")
+#install.packages("stargazer")
+
+library(Amelia)
+library(ggplot2)
+library(scales)
+library(data.table)
+library(forecast)
+library(gridExtra)
+library(ggpubr)
+library(grid)
+library(tseries)
+library(sarima)
+library(itsadug)
+library(lmtest)
+library(ggplot2)
+
+```
+##Data Source
+
+U.S. Bureau of Economic Analysis, Motor Vehicle Retail Sales: Domestic Autos*, retrieved from:https://fred.stlouisfed.org/series/DAUTONSA
+
+Data can also be obtained from : https://fred.stlouisfed.org/series/DAUTONSA?utm_source=series_page&utm_medium=related_content&utm_term=other_formats&utm_campaign=other_format
+
+Release: Supplemental Estimates, Motor Vehicles
+Units: Thousands of Units, Not Seasonally Adjusted
+Frequency: Monthly
+
+Autos are all passengers cars, including station wagons. Domestic sales are all United States sales of vehicles assembled in the U.S.
+
+First of all , we read teh data from the csv file(this file is up to date, and for now, it is updated to March of 2018). And the data looks like:
+```{r, echo=FALSE, message=FALSE,}
+monthly_sales <- read.csv("DAUTONSA.csv",header = TRUE, stringsAsFactors = FALSE)
+head(monthly_sales)
+
+```
+We will be using the monthly domestic auto sales(in thousands) for building our time series
+
+Before we proceed, let’s check if we have any missing data. Amelia library gives us a missmap function that shows the missing details in a visual map.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE,out.width = '65%' }
+missmap(monthly_sales,main = "Missing Values",col = c('light blue','Blue'),x.cex = 1.5)
+
+```
+
+Since no missing data is found, I would just go ahead with visually plotting the daily count to see if I can identify any trends, seasonality, cycle or outlier from the data.
+
+Before I plot the count data, I convert the dteday field from character to date type.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+monthly_sales$DATE <- as.Date(monthly_sales$DATE, "%Y-%m-%d")
+
+```
+Plot the monthly sales data:
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%' }
+uc_ts_plot <- ggplot(monthly_sales, aes(DATE,DAUTONSA)) + geom_line(na.rm=TRUE) + 
+  xlab("Month") + ylab("Auto Sales in Thousands") + 
+  scale_x_date(labels = date_format(format= "%b-%Y"),breaks = date_breaks("1 year")) +
+  stat_smooth(colour = "green")
+
+uc_ts_plot
+
+```
+
+There seems to be an outlier that we could see from the plot. I need to remove the outlier before proceed with stationarizing the series. 
+
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+monthly_ts <- ts(monthly_sales[,c('DAUTONSA')])
+monthly_sales$csales <- tsclean(monthly_ts)
+
+
+```
+
+Plot the cleaned monthly sales data:
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+c_ts_plot <- ggplot(monthly_sales, aes(DATE,csales)) + geom_line(na.rm=TRUE) + 
+  xlab("Month") + ylab("Auto Sales in Thousands") + 
+  scale_x_date(labels = date_format(format= "%b-%Y"),breaks = date_breaks("1 year")) + 
+  stat_smooth(colour="green")
+c_ts_plot
+```
+
+__Now, let’s compare both cleaned and uncleaned plots:__
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+grid.arrange(uc_ts_plot,c_ts_plot,ncol=1, top = textGrob("Uncleaned vs Cleaned Series"))
+```
+
+##Smoothing the series
+If data points are still volatile, then we can apply smoothing smoothing. By applying smoothing, we can have a better idea about the series and it’s components. It also makes the series more predictable. In this case, I would use the quarterly/biannualy moving average. If the data points are on a daily basis,many level of seasonality(daily, weekly, monthly or yearly) can be incorporated.
+
+However, looking at the graph, our data does not require any smoothing. Therefore, We go ahead with the cleaned data.
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+my_ts <- ts(na.omit(monthly_sales$csales), frequency = 12)
+```
+As data is monthly, we used frequency =12 in above command. We also ignore the NA values.
+
+Next, we plot the cleaned series to infer visual cues from the graph.
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+plot(my_ts)
+
+```
+
+##Identify Level of Differencing Required
+Now that the series is cleaned, we need to remove trend by using appropriate order of difference and make the series stationary. We do this by looking at acf, Dickey-Fuller Test and standard deviation.
+
+###Dickey Fuller test:
+X(t) = Rho * X(t-1) + Er(t)
+
+=> X(t) - X(t-1) = (Rho - 1) X(t - 1) + Er(t)
+
+We have to test if Rho - 1 is significantly different than zero or not. If the null hypothesis gets rejected, we’ll get a stationary time series.
+
+Stationary testing and converting a series into a stationary series are the most critical processes in a time series modelling. We need to memorize each and every detail of this concept to move on to the next step of time series modelling.
+
+To confirm that the series is not stationary, we perform the augmented Dickey-Fuller Test.
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+adf.test(my_ts)
+
+```
+P value is 0.01 indicating the null hypothesis ‘series is non-stationary’ is true i.e the series is not stationary.
+
+Plot the auto-correlation plot for the series to identify the order of differncing required.
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Acf(my_ts)
+```
+
+ACF plot shows positive correlation at higher lags. this indicates that we need differencing to make the series stationary.
+
+Let’s try order difference
+We will fit ARIMA(0,d,0)(0,D,0)[12] models and verify acf residuals to find which ‘d’ or ‘D’ order of differencing is appropriate in our case.
+
+Applying only one order of difference i.e ARIMA(0,1,0)(0,0,0)
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+dfit1 <- arima(my_ts,order = c(0,1,0))
+plot(residuals(dfit1))
+```
+
+Below is the acf and Pacf plot of residuals. 
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Acf(residuals(dfit1))
+```
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Pacf(residuals(dfit1))
+```
+
+The differenced series still shows some strong autocorrelation at the seasonal period 12 and 24. Because the seasonal pattern is strong and stable, we know that we will want to use an order of seasonal differencing in the model.
+
+Before that let’s try only with one seasonal difference 
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+dfit2 <- arima(my_ts, order =c(0,0,0), seasonal = list(order = c(0,1,0), period = 12))
+plot(residuals(dfit2))
+```
+
+Looking a the residual plot, residuals does not look like white noise. We also need to check the acf and pacf plots of residuals.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Acf(residuals(dfit2))
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Pacf(residuals(dfit2))
+```
+
+
+
+The seasonally differenced series shows a very strong pattern of positive autocorrelation and is similar to a seasonal random walk model. The correlation plots indicate an AR signature and/or incorporating another order of difference into the model.
+
+Let’s go ahead and apply both seasonal and non-seasonal differencing i,e ARIMA(0,1,0)(0,1,0)[12]
+
+
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+dfit3 <- arima(my_ts, order =c(0,1,0), seasonal = list(order = c(0,1,0), period = 12))
+plot(residuals(dfit3))
+```
+Residuals seems to return to the mean and we don’t see any pattern in the residuals.
+
+Below is the acf and Pacf plot of residuals.
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Acf(residuals(dfit3))
+```
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Pacf(residuals(dfit3))
+```
+ACF at lag 1 is -ve and slightly smaller than -0.2. We know that if the lag 1 acf falls below -0.5, then the series is over differenced. Positive spikes in acf have become negative, another sign of possible over differencing. Therefore, this model might be suffering from slight over differencing. This overdifferencing can be compensated by adding a MA term.
+
+To select the appropriate order of differencing, we have to consider the error statistics, the standard deviation in specific.
+
+In below summary, SD is same as RMSE.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+arima(x = my_ts, order = c(0, 1, 0))
+accuracy(arima(x = my_ts, order = c(0, 1, 0)))
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+arima(x = my_ts, order = c(0, 0, 0), seasonal = list(order = c(0, 1, 0), period = 12))
+accuracy(arima(x = my_ts, order = c(0, 0, 0), seasonal = list(order = c(0, 1, 0), period = 12)))
+
+```
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+arima(x = my_ts, order = c(1, 1, 1), seasonal = list(order = c(1, 1, 1), period = 12))
+accuracy(arima(x = my_ts, order = c(1, 1, 1), seasonal = list(order = c(1, 1, 1), period = 12)))
+
+```
+
+
+####Selecting appropriate order of differencing:
+The optimal order of differencing is often the order of differencing at which the standard deviation is lowest. (Not always, though. Slightly too much or slightly too little differencing can also be corrected with AR or MA terms.
+
+Out of the above, dfit3 model i.e ARIMA(1,1,1)(1,1,1)12 has the lowest standard deviation(RMSE) and AIC. Therefore, it seems like the correct order of differencing. But we will find that it isn't.
+
+Therefore, the value of d=1 and D=1 is set. Now, we need to identify AR/MA and SAR/SMA values and fit the model.
+
+
+##Identifying the AR/MA(p/q) and SAR/SMA(P/Q) components.
+
+Looking back at the correlation plot of model dfit3, ACF is negative at lag 1 and shows sharp cut-off immediately after lag 1, we can add a MA to the model to compensate for the overdifferencing.
+
+Since, we do not see any correlation at lag s,2s,3s etc i.e 12,24,36 etc, we do not need to add SAR/SMA to our model.
+
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+dfit4 <- arima(my_ts, order =c(1,1,2), seasonal = list(order = c(3,0,0), period = 12), method="CSS")
+plot(residuals(dfit4))
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Acf(residuals(dfit4))
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Pacf(residuals(dfit4))
+```
+Looking at he residual plot for above model, slight amount of correlation remains at lag 10 and 22, but the overall plots seem good.
+
+Thus, this model seems like a good fit pending statistically significant MA co-efficient and low AIC.
+
+##check for Statistical Significance
+
+Let’s check the model parameter’s significance. 
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE}
+coeftest(dfit4)
+```
+As we can see, P value is negligible and thus the test confirms that MA1 coefficient is statistically significant.
+
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+dfit5 <- auto.arima(my_ts, seasonal = TRUE)
+plot(residuals(dfit5))
+```
+Residual plot is similar to that of the model we built above.
+
+Next, we see the acf, pacf and summary of the auto built model.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+Acf(residuals(dfit5))
+```
+
+```{r,fig.align='center',  echo=FALSE,message=FALSE,warning=FALSE,out.width = '65%'}
+Pacf(residuals(dfit5))
+```
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+coeftest(dfit5)
+```
+Auto arima gives us ARIMA(1,1,2)(1,2,0)[12]
+Auto arima gives us ARIMA(1,1,2)(1,2,0)[12]. All coefficients are significant.
+
+Clearly this model performs worse than the model we built earlier as ARIMA(1,1,2)(3,0,0)[12] 
+
+By rule of parsimony and/or minimum AIC, we can reject ARIMA(1,1,2)(1,2,0)[12] and accept ARIMA(1,1,2)(3,0,0)[12] as our model.
+
+##Model Validation
+To see how our model will perform in future, we can use n-fold holdout method.
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+hold <- window(ts(my_ts), start = 72)
+```
+Fit the model to predict for observation(months) 72 through 83.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+fit_predicted <- arima(ts(my_ts[-c(600:616)]), order =c(1,1,2), seasonal = list(order = c(3,0,0), period = 12),method="CSS")
+
+```
+Use the above model to forecast values for last 10 months. Forecasting using a fitted model is straightforward in R. We can specify forecast horizon h periods ahead for predictions to be made, and use the fitted model to generate those predictions:
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+forecast_pred <- forecast(fit_predicted,h=15)
+plot(forecast_pred)
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+plot(my_ts)
+```
+In the above graph, blue line is the predicted data and the confidence bands are in dark grey(80%) and light grey(95%).
+
+Model’s prediction is pretty good and we can see predicted sales closely follow the actual data. This is an indication of a good model.
+
+
+##Sales Prediction for 2018/19.
+Next step in our model is to forecast values i.e the monthly sales data. We have specified h=24 to predict for next 24 observations(months) i.e next 2 years - 2018 and 2019.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+f_values <- forecast(dfit4, h=24)
+plot(f_values)
+```
+So, from the forecasting model, we can see that the auto sales seems like is gonna keep going down in the next 2 years. But seems like it is gonna going up at the the beginning of the 2020.
+
+## Different car brands
+
+After predict the value of the total sales in the US market, I want to do something more. I want to predict all the different brands of passenger automotives perform in the next month(we only predict MAY)
+
+So, I’ll produce predictions for US car sales by manufacture every month. Unlike above analysis, I’ll try to focus on the residuals (the stuff I can’t predict) to tell the story. 
+
+The Autoblog article <https://www.autoblog.com/2014/10/01/september-2014-by-the-numbers/> highlights Mitsubishi for increasing sales. However, my prediction for Mitsubishi sales are pretty much exactly what the sales were. In essence, given this model, we didn’t learn much. On the other hand, Land Rover and Jaguar had the largest residuals (in percent terms) and Land Rover and Acura had the largest deviance (Residual / Variance). I think these results are more telling because we didn’t predict them correctly; something might have changed. 
+```{r,  echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+#install.package("stargazer")
+library(dlm)
+library(stargazer)
+
+##MLE
+
+current.month="2018-05-01"
+cars=read.csv("merged.data2018-05-01.csv")
+
+data=cars[,-c(1:3)]
+data=data[,-which(colnames(data)=="dates")]
+data=data[,-which(colnames(data)=="Number.of.Days.sold")]
+data=data[,-which(colnames(data)=="new.dates..1.")]
+
+data=data[,-which(colSums(is.na(data))>0)]
+data=data[,-which(data[109,]==0)]
+data=data[,-which(colSums(data==0)>0)]
+data=data/cars$Number.of.Days.sold
+
+build.mod=function(parm){
+  mod=dlmModPoly()+dlmModSeas(12)
+  mod$m0[1]=y[1]
+  mod$V=parm[1]
+  diag(mod$W)[1:3]=parm[2:4]
+  return(mod)
+}
+
+parm.values=vector()
+for(i in 1:dim(data)[2]){
+  y <- ts((data[,i]), frequency = 1) 
+  fit <- dlmMLE(y, parm =rep(1,4), build =build.mod, lower=rep(10e-10,4))
+  parm.values=rbind(parm.values,fit$par)
+}
+
+len.dat=dim(data)[1]
+
+statesGrowth=matrix(0,len.dat,dim(parm.values)[1])
+statesSeason=matrix(0,len.dat,dim(parm.values)[1])
+statesLevel=matrix(0,len.dat,dim(parm.values)[1])
+
+n.ahead=12
+predictLevel=matrix(0,n.ahead,dim(parm.values)[1])
+predictGrowth=matrix(0,n.ahead,dim(parm.values)[1])
+predictSeason=matrix(0,n.ahead,dim(parm.values)[1])
+
+sdForLevel=matrix(0,n.ahead,dim(parm.values)[1])
+sdForMu=matrix(0,n.ahead,dim(parm.values)[1])
+sdForSeas=matrix(0,n.ahead,dim(parm.values)[1])
+
+
+for(i in 1:dim(parm.values)[1]){
+  mod.final=build.mod(parm.values[i,])
+  y <- ts((data[,i]), frequency = 1) 
+  fit.filter <- dlmFilter(y, mod.final)
+  modSmooth=dlmSmooth(fit.filter)
+  
+  statesLevel[,i]=modSmooth$s[-1,1]
+  statesGrowth[,i]=modSmooth$s[-1,2]
+  statesSeason[,i]=modSmooth$s[-1,3]
+  
+  forecast=dlmForecast(fit.filter,nAhead=12)
+  predictLevel[,i]=forecast$a[,1]
+  predictGrowth[,i]=forecast$a[,2]
+  predictSeason[,i]=forecast$a[,3]
+  
+  
+  sdForLevel[,i]=sapply(forecast$R,function(x)sqrt(x[1,1]))
+  sdForMu[,i]=sapply(forecast$R,function(x)sqrt(x[2,2]))
+  sdForSeas[,i]=sapply(forecast$R,function(x)sqrt(x[3,3]))
+  
+  
+}
+colnames(statesGrowth)=colnames(data)
+colnames(statesSeason)=colnames(data)
+colnames(statesLevel)=colnames(data)
+
+colnames(predictLevel)=colnames(data)
+colnames(predictGrowth)=colnames(data)
+colnames(predictSeason)=colnames(data)
+
+
+colnames(sdForLevel)=colnames(data)
+colnames(sdForMu)=colnames(data)
+colnames(sdForSeas)=colnames(data)
+
+puMu=predictGrowth+qnorm(0.95,sd=sdForMu)
+plMu=predictGrowth+qnorm(0.05,sd=sdForMu)
+
+puLevel=predictLevel+qnorm(0.95,sd=sdForLevel)
+plLevel=predictLevel+qnorm(0.05,sd=sdForLevel)
+
+puSeas=predictSeason+qnorm(0.95,sd=sdForSeas)
+plSeas=predictSeason+qnorm(0.05,sd=sdForSeas)
+
+
+save(statesGrowth,statesSeason,statesLevel,predictLevel,predictGrowth,predictSeason,puMu,puLevel,puSeas,plMu,plLevel,plSeas,data, file="C:\\Users\\Cheng Xi\\Desktop\\Car-Sales-Git-master\\data")
+
+
+
+predict.next.month=t(as.matrix(predictLevel[1,]+predictSeason[1,]))
+rownames(predict.next.month)="Predicted Values for 10/14"
+stargazer(t(predict.next.month), type="html")
+
+log.diff.expected=as.matrix(log(data[111,]/predict.next.month))
+deviance=as.matrix((abs(data[111,]-predict.next.month))/(sdForSeas[1,]+sdForLevel[1,]))
+
+pub.table=rbind(predict.next.month, (data[111,]),log.diff.expected, deviance)
+pub.table=t(pub.table)
+colnames(pub.table)=c("Predicted Values 9/14", "Actual Values 9/14", "log(Predicted/Actual)", "Deviance")
+library(stargazer)
+stargazer(pub.table, type="html")
+
+barplot(pub.table[,3:4])
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center'}
+pub.table.2=pub.table[names(sort(pub.table[,3])),]
+par(mfrow=c(2,1))
+```
+I have made a shiny app to show the final result, and here is the shiny URL: <https://chengxi.shinyapps.io/CarSalesShiny/> . From this shiny website , you can see all the prediction of the sales of different main brands in the US market.
+
+And then, let us test the difference between actual data and the expected data for car sale in April:
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+barplot(pub.table.2[,3],xaxt="n", main="log(Observed/Expected) for Car Sales 04/18")
+text( x=1.182759*1:29, y=0,names(sort(pub.table[,3])),  srt=45)
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE,fig.align='center',out.width = '65%'}
+barplot(pub.table.2[,4],xaxt="n", main="Deviance Given Expected Standard Deviation Forecast Car Sales 04/18")
+text( x=1.182759*1:29, y=1,names(sort(pub.table[,3])),  srt=45)
+```
+
+From these two figures, we can see that the difference between the actual value and the predicted value is not that big. So we can see that it is a useful way to predict the  auto sales of various brands.
+
+##Summary: 
+All this project is about prediction: The prediction of total value, and the prediction of various brands. From the result which is credible, as investors or the managers of Auto Industry, they can choose differnet ways to handle the situiation in the future. 
